@@ -1,0 +1,165 @@
+# What do you get on the 13th day of Christmas?
+
+A response to [Bob Rudis's Ode to Christmas Shopping](https://rud.is/b/2017/12/05/the-cost-of-true-love-a-k-a-the-tidy-and-expensive-twelve-days-of-christmas/). What would happen if Christmas had an extra day? Let's try to find out by throwing a bunch of Christmas carols at a deep learning network to see what it suggests as an extension of
+```{r}
+day13 <- "on the thirteenth day of christmas my true love gave to me" # what?
+```
+
+I'm only going to say this once: This is programming as a joke! The deep learning model is garbage, and no sensible results are or can be expected. But it's a heap of fun nevertheless! Christmas carol texts were obtained from all English-language carols given at
+[http://www.lyricsmode.com/lyrics/c/christmas_carols/](http://www.lyricsmode.com/lyrics/c/christmas_carols/), and dumped in a `/texts/` directory.
+
+-----------------
+
+## Some text pre-processing
+
+First convert these texts to vectors of words.
+```{r process-files, message = FALSE}
+require (magrittr)
+process_one <- function (f)
+{
+    con <- file (f, open = "r")
+    txt <- readLines (con, warn = FALSE)
+    close (con)
+    paste (txt, collapse = " ") %>%
+        gsub ("[[:punct:]]|\\-\\-", "", .) %>%
+        gsub ("^\\s+", "", .) %>% # gsub stops at 1st match, so this is separate
+        tolower () %>%
+        strsplit (split = "\\s+") %>%
+        extract2 (1)
+}
+f <- list.files ("./texts", full.names = TRUE)
+txts <- lapply (f, process_one)
+```
+Then get some stats for setting up the network
+```{r word-stats}
+lens <- vapply (txts, length, numeric (1))
+minlen <- min (lens) # 47
+nwords <- sum (lens) # 7515
+words <- unique (unlist (txts))
+message (format (nwords, big.mark = ","), " words with ",
+         format (length (words), big.mark = ","), " unique = ",
+         formatC (nwords / length (words), format = "f", digits = 2),
+         " symbols per song, or ",
+         formatC (length (words) / mean (lens), format = "f", digits = 2),
+         " occurrences of each symbol per song")
+```
+Process our `day13` string, add to `words`, and convert `txts` to symbols
+```{r add13}
+day13 <- day13 %>% strsplit (split = "\\s") %>%
+    extract2 (1)
+words <- unique (c (words, day13))
+txts <- lapply (txts, function (i) match (i, words))
+```
+Then convert `txts` to rolling sequences of symbols defined by the length of the shortest carol (which is 47 words)
+```{r rolltxt}
+rolltxt <- function (txt, len = minlen)
+{
+    res <- list ()
+    while (length (txt) > len)
+    {
+        res [[length (res) + 1]] <- txt [1:len]
+        txt <- txt [2:length (txt)]
+    }
+    do.call (cbind, res)
+}
+dat <- lapply (txts, rolltxt) %>% do.call (cbind, .)
+dat <- dat / length (words)
+```
+And separate into training and test components
+```{r train-test}
+ntest <- 3 # test 3 word sequences
+train <- t (dat [1:(nrow (dat) - ntest), ])
+test <- t (dat [(nrow (dat) - ntest + 1):nrow (dat), ])
+```
+(yeah yeah, the `test` data are also in the `train` data, I know ...)
+
+-----------------
+
+## keras time
+
+Define a [`kerasR`](https://cran.r-project.org/package=kerasR) model (using the TensorFlow backend here) as the simplest of all possible sequential [Long-Short Term Memory (LSTM)](https://keras.io/layers/recurrent/#lstm) layers.
+
+
+```{r keras-setup, message = FALSE}
+library (kerasR)
+train <- t (dat [1:(nrow (dat) - ntest), ])
+test <- t (dat [(nrow (dat) - ntest + 1):nrow (dat), ])
+n <- ncol (train) # 44
+n_neurons <- 500
+batch_size <- 32
+mod <- Sequential()
+mod$add (LSTM (n_neurons, input_shape= c (1, n)))
+mod$add (Dense (ncol (test)))
+keras_compile (mod, loss='mean_squared_error', optimizer='adam')
+```
+We need to convert our 2-D training data from the carol texts into a 3-D tensor:
+```{r training-data}
+train3 <- array (NA, dim = c (nrow (train), 1, ncol (train))) # make tensor
+train3 [, 1, ] <- train
+```
+Then train the model on the carols:
+```{r, echo = FALSE}
+dokeras <- TRUE
+if (file.exists ("the_model.h5"))
+  dokeras <- FALSE
+```
+```{r keras-fit, eval = dokeras}
+keras_fit (mod, train3, test, batch_size = 32, epochs=10, verbose = 1,
+           validation_split = 0.1)
+```
+```{r keras-save, eval = dokeras, echo = FALSE}
+keras_save (mod, "the_model.h5")
+```
+```{r keras-load, echo = FALSE, message = FALSE}
+mod <- keras_load("the_model.h5")
+```
+
+-----------------
+
+### Prediction
+
+First set up our prediction text which is the (final portion of the) text of the twelve days of Christmas, plus:
+```{r}
+paste (day13, collapse = " ")
+```
+```{r day13-process}
+len <- minlen - ntest
+txt <- process_one (f = "test.txt") # full text of the 12 days
+day13 <- "on the thirteenth day of christmas my true love gave to me" %>%
+    strsplit (split = "\\s") %>%
+    extract2 (1)
+txt <- c (txt, day13) %>%
+  tail (len) %>%
+  match (words) %>%
+  array (dim = c (1, 1, length (.)))
+```
+Use that to predict, first setting up the prediction text
+```{r keras-predict}
+library (kerasR)
+mod <- keras_load ("the_model.h5")
+x <- keras_predict (mod, txt)
+```
+Then just match that prediction back onto the words
+```{r predict-to-words}
+x <- words [round (keras_predict (mod, txt) * length (words))]
+```
+
+### And so what did I get?
+
+With a bit of visual embellishment in Christmas card form ...
+
+```{r plot, message = FALSE, fig.width = 10}
+library (extrafont)
+fonttable <- fonts ()
+plot.new ()
+par (mar = rep (0, 4), bg = "gray5", family = "Sawasdee")
+plot (NULL, NULL, xlim = c (0, 1), ylim = c (0, 1),
+      xlab = "", ylab = "", xaxt = "n", yaxt = "n", frame = FALSE)
+text (x = 0.5, y = 0.97, adj = 0.5, cex = 2, col = "gray95",
+      labels = "On the thirteenth day of Christmas")
+text (x = 0.5, y = 0.9, adj = 0.5, cex = 2, col = "gray95",
+      labels = "my true love gave to me ...")
+text (x = 0.5, y = 0.45 + (-1:1) * 0.25, adj = 0.5, labels = x,
+      cex = 10, col = "gray95")
+```
+There you go. If you don't understand what 'nigh by bed' means, ask the machine.
